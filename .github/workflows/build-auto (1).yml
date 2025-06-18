@@ -1,66 +1,74 @@
 name: Build Aseprite
-on: [push, workflow_dispatch]
+on:
+  workflow_dispatch:
+    inputs:
+      aseprite_version:  # 动态输入 Aseprite 版本
+        description: "Aseprite Version (e.g v1.3.13)"
+        required: true
+        default: "v1.3.13"
+      skia_link:  # 动态输入预编译 Skia 的下载链接
+        description: "Prebuilt Skia Download URL"
+        required: true
+        default: "https://github.com/aseprite/skia/releases/download/m102/Skia-Windows-Release-x64.zip"
 
 jobs:
   build:
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]  # 三平台支持
-        include:
-          - os: ubuntu-latest
-            skia_arch: x64
-            build_dir: build
-          - os: macos-latest
-            skia_arch: arm64  # Apple Silicon 原生支持[6](@ref)
-            build_dir: build
-          - os: windows-latest
-            skia_arch: x64
-            build_dir: build
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        skia_arch: 
+          ubuntu-latest: "x64"
+          macos-latest: "arm64"  # Apple Silicon 原生支持
+          windows-latest: "x64"
 
-    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive  # 必须递归检出子模块[2,8](@ref)
-
-      - name: Install Build Tools
+      # 1. 动态下载 Aseprite 源码（关键修复！）
+      - name: Download Aseprite Source
         run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo apt-get update
+          VERSION=${{ github.event.inputs.aseprite_version }}
+          wget "https://github.com/aseprite/aseprite/archive/refs/tags/${VERSION}.zip" -O aseprite-src.zip
+          unzip aseprite-src.zip -d aseprite-src
+          mv aseprite-src/aseprite-${VERSION#v}/* .
+
+      # 2. 安装 Skia 依赖（支持自定义链接）
+      - name: Install Skia
+        run: |
+          SKIA_URL="${{ github.event.inputs.skia_link }}"
+          wget "$SKIA_URL" -O skia.zip
+          unzip skia.zip -d skia
+          # 重命名 Skia 输出目录以匹配编译要求
+          mv skia skia-${{ matrix.skia_arch }}
+
+      # 3. 安装编译工具链（区分平台）
+      - name: Setup Build Tools
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
             sudo apt-get install -y cmake ninja-build libcurl4-openssl-dev
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+          elif [ "${{ runner.os }}" = "macOS" ]; then
             brew install cmake ninja
-          elif [[ "${{ runner.os }}" == "Windows" ]]; then
-            choco install cmake ninja -y  # Windows 需额外安装编译器[8](@ref)
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            choco install cmake ninja -y
           fi
 
-      - name: Compile Skia (关键依赖)
-        run: |
-          git clone --depth 1 -b m102-861e4743af https://github.com/aseprite/skia.git
-          cd skia
-          python tools/git-sync-deps
-          # Apple Silicon 需指定 target_cpu="arm64"[6](@ref)
-          bin/gn gen out/Release-${{ matrix.skia_arch }} --args='is_debug=false target_cpu="${{ matrix.skia_arch }}"'
-          ninja -C out/Release-${{ matrix.skia_arch }} skia
-
+      # 4. 编译配置（动态传递 Skia 路径）
       - name: Configure and Build
         env:
-          SKIA_DIR: ${{ github.workspace }}/skia
+          SKIA_DIR: ${{ github.workspace }}/skia-${{ matrix.skia_arch }}
         run: |
-          mkdir ${{ matrix.build_dir }} && cd ${{ matrix.build_dir }}
-          # macOS 需指定 -DCMAKE_OSX_ARCHITECTURES=arm64[6](@ref)
+          mkdir build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DLAF_BACKEND=skia \
-            -DSKIA_DIR=$SKIA_DIR \
-            -DSKIA_LIBRARY_DIR=$SKIA_DIR/out/Release-${{ matrix.skia_arch }} \
+            -DSKIA_DIR="$SKIA_DIR" \
+            -DSKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-${{ matrix.skia_arch }}" \
             ${{ matrix.os == 'macos-latest' && '-DCMAKE_OSX_ARCHITECTURES=arm64' || '' }} \
             -G Ninja
           ninja aseprite
 
+      # 5. 上传产物（自动包含可执行文件）
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: aseprite-${{ runner.os }}-${{ matrix.skia_arch }}
-          path: ${{ matrix.build_dir }}/bin/aseprite*
+          path: build/bin/aseprite*
