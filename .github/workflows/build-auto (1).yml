@@ -6,10 +6,10 @@ on:
         description: "Aseprite Version (e.g v1.3.13)"
         required: true
         default: "v1.3.13"
-      skia_link:  # 动态输入预编译 Skia 的下载链接
-        description: "Prebuilt Skia Download URL"
+      skia_arch:  # 动态选择 Skia 架构
+        description: "Skia Architecture (x64/arm64)"
         required: true
-        default: "https://github.com/aseprite/skia/releases/download/m102/Skia-Windows-Release-x64.zip"
+        default: "x64"
 
 jobs:
   build:
@@ -17,58 +17,46 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        skia_arch: 
-          ubuntu-latest: "x64"
-          macos-latest: "arm64"  # Apple Silicon 原生支持
-          windows-latest: "x64"
 
     steps:
-      # 1. 动态下载 Aseprite 源码（关键修复！）
+      # 1. 动态下载 Aseprite 源码（核心修复！）
       - name: Download Aseprite Source
         run: |
           VERSION=${{ github.event.inputs.aseprite_version }}
-          wget "https://github.com/aseprite/aseprite/archive/refs/tags/${VERSION}.zip" -O aseprite-src.zip
-          unzip aseprite-src.zip -d aseprite-src
-          mv aseprite-src/aseprite-${VERSION#v}/* .
+          # 官方 Release 源码包地址（固定格式）
+          URL="https://github.com/aseprite/aseprite/archive/refs/tags/${VERSION}.zip"
+          wget "$URL" -O aseprite-src.zip
+          unzip aseprite-src.zip
+          mv aseprite-${VERSION#v} aseprite-src
 
-      # 2. 安装 Skia 依赖（支持自定义链接）
+      # 2. 安装 Skia（根据参数选择架构）
       - name: Install Skia
         run: |
-          SKIA_URL="${{ github.event.inputs.skia_link }}"
+          ARCH=${{ github.event.inputs.skia_arch }}
+          # 官方预编译 Skia 地址（动态匹配架构）
+          SKIA_URL="https://github.com/aseprite/skia/releases/download/m102/Skia-${{ runner.os }}-Release-${{ github.event.inputs.skia_arch }}.zip"
           wget "$SKIA_URL" -O skia.zip
-          unzip skia.zip -d skia
-          # 重命名 Skia 输出目录以匹配编译要求
-          mv skia skia-${{ matrix.skia_arch }}
+          unzip skia.zip -d skia-${{ github.event.inputs.skia_arch }}
 
-      # 3. 安装编译工具链（区分平台）
-      - name: Setup Build Tools
-        run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get install -y cmake ninja-build libcurl4-openssl-dev
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            brew install cmake ninja
-          elif [ "${{ runner.os }}" = "Windows" ]; then
-            choco install cmake ninja -y
-          fi
-
-      # 4. 编译配置（动态传递 Skia 路径）
+      # 3. 编译配置（传递动态路径）
       - name: Configure and Build
         env:
-          SKIA_DIR: ${{ github.workspace }}/skia-${{ matrix.skia_arch }}
+          SKIA_DIR: ${{ github.workspace }}/skia-${{ github.event.inputs.skia_arch }}
         run: |
+          cd aseprite-src
           mkdir build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DLAF_BACKEND=skia \
             -DSKIA_DIR="$SKIA_DIR" \
-            -DSKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-${{ matrix.skia_arch }}" \
+            -DSKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-${{ github.event.inputs.skia_arch }}" \
             ${{ matrix.os == 'macos-latest' && '-DCMAKE_OSX_ARCHITECTURES=arm64' || '' }} \
             -G Ninja
           ninja aseprite
 
-      # 5. 上传产物（自动包含可执行文件）
+      # 4. 上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aseprite-${{ runner.os }}-${{ matrix.skia_arch }}
-          path: build/bin/aseprite*
+          name: aseprite-${{ runner.os }}-${{ github.event.inputs.skia_arch }}
+          path: aseprite-src/build/bin/aseprite*
