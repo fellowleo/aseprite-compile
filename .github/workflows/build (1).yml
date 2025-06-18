@@ -1,109 +1,66 @@
-name: build
-on: [push, pull_request]
+name: Build Aseprite Mac
+on:
+  workflow_dispatch:
+    inputs:
+      aseprite_version:
+        description: "Aseprite Version (e.g v1.3.13)"
+        required: true
+        default: "v1.3.13"
+      skia_link:  # 用户可自定义 Skia 预编译包链接
+        description: "Prebuilt Skia Download URL (Optional)"
+        required: false  # 非必填
+        default: "https://github.com/aseprite/skia/releases/download/m102/Skia-${{ runner.os }}-Release-${{ matrix.skia_arch }}.zip"
+      aseprite_source_url:  # 用户可自定义源码包地址
+        description: "Aseprite Source Archive URL (Optional)"
+        required: false
+        default: "https://github.com/aseprite/aseprite/archive/refs/tags/${{ github.event.inputs.aseprite_version }}.zip"
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-        build_type: [RelWithDebInfo, Debug]
-        ui: [gui, cli]
-        scripting: [lua, noscripts]
-        exclude:
-          - build_type: Debug
-            ui: gui
-          - build_type: RelWithDebInfo
-            ui: cli
-          - build_type: RelWithDebInfo
-            scripting: noscripts
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        skia_arch:  # 动态匹配架构
+          ubuntu-latest: "x64"
+          macos-latest: "arm64"
+          windows-latest: "x64"
+
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: 'recursive'
-    - name: Install Dependencies
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y \
-          libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
-          libx11-dev libxcursor-dev libxi-dev libgl1-mesa-dev libfontconfig1-dev
-    - name: Install Skia
-      if: ${{ matrix.ui == 'gui' }}
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Windows" ]] ; then
-          this_dir=$(cygpath "${{ github.workspace }}")
-        else
-          this_dir="${{ github.workspace }}"
-        fi
-        skia_url=$(source $this_dir/laf/misc/skia-url.sh | xargs)
-        skia_file=$(basename $skia_url)
-        curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
-        unzip "$skia_file" -d skia
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2.17
-      if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
-      with:
-        key: ${{ matrix.os }}-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
-    - uses: aseprite/get-ninja@main
-    - uses: ilammy/msvc-dev-cmd@v1
-      if: runner.os == 'Windows'
-    - name: Generating Makefiles
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Windows" ]] ; then
-          export enable_ccache=off
-        else
-          export enable_ccache=on
-        fi
+      # 1. 动态下载 Aseprite 源码（用户可覆盖默认地址）
+      - name: Download Aseprite Source
+        run: |
+          SOURCE_URL="${{ github.event.inputs.aseprite_source_url || 'https://github.com/aseprite/aseprite/archive/refs/tags/${{ github.event.inputs.aseprite_version }}.zip' }}"
+          wget "$SOURCE_URL" -O aseprite-src.zip
+          unzip aseprite-src.zip
+          mv aseprite-${ { github.event.inputs.aseprite_version#v } } aseprite-src
 
-        if [[ "${{ matrix.ui }}" == "gui" ]] ; then
-          export laf_backend=skia
-        else
-          export laf_backend=none
-        fi
+      # 2. 安装 Skia（用户可覆盖默认链接）
+      - name: Install Skia
+        run: |
+          SKIA_URL="${{ github.event.inputs.skia_link || 'https://github.com/aseprite/skia/releases/download/m102/Skia-${{ matrix.os }}-Release-${{ matrix.skia_arch }}.zip' }}"
+          wget "$SKIA_URL" -O skia.zip
+          unzip skia.zip -d skia-${{ matrix.skia_arch }}
 
-        if [[ "${{ matrix.scripting }}" == "lua" ]] ; then
-          export enable_scripting=on
-        else
-          export enable_scripting=off
-        fi
+      # 3. 编译配置（自动传递路径）
+      - name: Configure and Build
+        env:
+          SKIA_DIR: ${{ github.workspace }}/skia-${{ matrix.skia_arch }}
+        run: |
+          cd aseprite-src
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$SKIA_DIR" \
+            -DSKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-${{ matrix.skia_arch }}" \
+            ${{ matrix.os == 'macos-latest' && '-DCMAKE_OSX_ARCHITECTURES=arm64' || '' }} \
+            -G Ninja
+          ninja aseprite
 
-        if [[ "${{ runner.os }}" == "macOS" ]] ; then
-          export skia_arch=arm64
-        else
-          export skia_arch=x64
-        fi
-
-        cmake -S . -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
-          -DENABLE_TESTS=ON \
-          -DENABLE_SCRIPTING=$enable_scripting \
-          -DENABLE_CCACHE=$enable_ccache \
-          -DLAF_BACKEND=$laf_backend \
-          -DSKIA_DIR=$(realpath skia) \
-          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
-    - name: Compiling
-      shell: bash
-      run: |
-        cd build && ninja
-    - name: Running C++ Tests
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Linux" ]] ; then
-          export XVFB=xvfb-run
-        fi
-        cd build && $XVFB ctest --output-on-failure
-    - name: Running CLI Tests
-      if: ${{ matrix.scripting == 'lua' }}
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Linux" ]] ; then
-          export XVFB=xvfb-run
-        fi
-        export ASEPRITE=$PWD/build/bin/aseprite
-        cd tests
-        $XVFB bash run-tests.sh
+      # 4. 上传产物
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aseprite-${{ runner.os }}-${{ matrix.skia_arch }}
+          path: aseprite-src/build/bin/aseprite*
