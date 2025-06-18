@@ -1,19 +1,19 @@
-name: Build Aseprite Mac
+name: Build Aseprite M
 on:
   workflow_dispatch:
     inputs:
       aseprite_version:
-        description: "Aseprite Version (e.g v1.3.13)"
+        description: "Aseprite 版本号 (例如 v1.3.14.2)"
         required: true
-        default: "v1.3.13"
-      skia_link:  # 用户可自定义 Skia 预编译包链接
-        description: "Prebuilt Skia Download URL (Optional)"
-        required: false  # 非必填
-        default: "https://github.com/aseprite/skia/releases/download/m102/Skia-${{ runner.os }}-Release-${{ matrix.skia_arch }}.zip"
-      aseprite_source_url:  # 用户可自定义源码包地址
-        description: "Aseprite Source Archive URL (Optional)"
+        default: "v1.3.14.2"
+      aseprite_source_url:
+        description: "自定义源码包地址 (可选)"
         required: false
-        default: "https://github.com/aseprite/aseprite/archive/refs/tags/${{ github.event.inputs.aseprite_version }}.zip"
+        default: ""
+      skia_arch:
+        description: "Skia 架构 (x64/arm64)"
+        required: true
+        default: "x64"
 
 jobs:
   build:
@@ -21,28 +21,43 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        skia_arch:  # 动态匹配架构
-          ubuntu-latest: "x64"
-          macos-latest: "arm64"
-          windows-latest: "x64"
+        # 动态定义 Skia 架构（Mac 强制 arm64）
+        include:
+          - os: macos-latest
+            skia_arch: arm64
+          - os: ubuntu-latest
+            skia_arch: x64
+          - os: windows-latest
+            skia_arch: x64
 
     steps:
-      # 1. 动态下载 Aseprite 源码（用户可覆盖默认地址）
+      # 1. 下载 Aseprite 源码（硬编码您的默认地址）
       - name: Download Aseprite Source
         run: |
-          SOURCE_URL="${{ github.event.inputs.aseprite_source_url || 'https://github.com/aseprite/aseprite/archive/refs/tags/${{ github.event.inputs.aseprite_version }}.zip' }}"
+          if [ -z "${{ inputs.aseprite_source_url }}" ]; then
+            # 使用您指定的默认地址（v1.3.14.2）
+            SOURCE_URL="https://github.com/aseprite/aseprite/releases/download/${{ inputs.aseprite_version }}/Aseprite-${{ inputs.aseprite_version }}-Source.zip"
+          else
+            SOURCE_URL="${{ inputs.aseprite_source_url }}"
+          fi
           wget "$SOURCE_URL" -O aseprite-src.zip
           unzip aseprite-src.zip
-          mv aseprite-${ { github.event.inputs.aseprite_version#v } } aseprite-src
+          mv Aseprite-${{ inputs.aseprite_version }}-Source aseprite-src
 
-      # 2. 安装 Skia（用户可覆盖默认链接）
+      # 2. 安装 Skia（Mac 地址硬编码，其他平台动态生成）
       - name: Install Skia
         run: |
-          SKIA_URL="${{ github.event.inputs.skia_link || 'https://github.com/aseprite/skia/releases/download/m102/Skia-${{ matrix.os }}-Release-${{ matrix.skia_arch }}.zip' }}"
+          if [ "${{ runner.os }}" == "macOS" ]; then
+            # macOS 专用地址（官方 M102 稳定版）
+            SKIA_URL="https://github.com/aseprite/skia/releases/download/m102/Skia-macOS-Release-arm64.zip"
+          else
+            # 其他平台动态生成
+            SKIA_URL="https://github.com/aseprite/skia/releases/download/m102/Skia-${{ runner.os }}-Release-${{ matrix.skia_arch }}.zip"
+          fi
           wget "$SKIA_URL" -O skia.zip
           unzip skia.zip -d skia-${{ matrix.skia_arch }}
 
-      # 3. 编译配置（自动传递路径）
+      # 3. 编译配置
       - name: Configure and Build
         env:
           SKIA_DIR: ${{ github.workspace }}/skia-${{ matrix.skia_arch }}
