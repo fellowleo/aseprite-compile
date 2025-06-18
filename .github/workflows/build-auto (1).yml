@@ -1,39 +1,66 @@
 name: Build Aseprite
-on: [push, workflow_dispatch]  # 支持手动触发
+on: [push, workflow_dispatch]
 
 jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]  # 三平台支持
+        include:
+          - os: ubuntu-latest
+            skia_arch: x64
+            build_dir: build
+          - os: macos-latest
+            skia_arch: arm64  # Apple Silicon 原生支持[6](@ref)
+            build_dir: build
+          - os: windows-latest
+            skia_arch: x64
+            build_dir: build
+
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          submodules: recursive  # 必须递归检出子模块 [1,3](@ref)
+          submodules: recursive  # 必须递归检出子模块[2,8](@ref)
 
-      - name: Install Dependencies
+      - name: Install Build Tools
         run: |
-          # 根据系统安装 CMake/Ninja (参考上文)
-          # 编译 Skia (需缓存加速)
-          # Windows 安装 MSVC [1](@ref)
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build libcurl4-openssl-dev
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            brew install cmake ninja
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            choco install cmake ninja -y  # Windows 需额外安装编译器[8](@ref)
+          fi
+
+      - name: Compile Skia (关键依赖)
+        run: |
+          git clone --depth 1 -b m102-861e4743af https://github.com/aseprite/skia.git
+          cd skia
+          python tools/git-sync-deps
+          # Apple Silicon 需指定 target_cpu="arm64"[6](@ref)
+          bin/gn gen out/Release-${{ matrix.skia_arch }} --args='is_debug=false target_cpu="${{ matrix.skia_arch }}"'
+          ninja -C out/Release-${{ matrix.skia_arch }} skia
 
       - name: Configure and Build
         env:
           SKIA_DIR: ${{ github.workspace }}/skia
         run: |
-          mkdir build && cd build
+          mkdir ${{ matrix.build_dir }} && cd ${{ matrix.build_dir }}
+          # macOS 需指定 -DCMAKE_OSX_ARCHITECTURES=arm64[6](@ref)
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DLAF_BACKEND=skia \
             -DSKIA_DIR=$SKIA_DIR \
-            -DSKIA_LIBRARY_DIR=$SKIA_DIR/out/Release-${{ runner.arch }} \
+            -DSKIA_LIBRARY_DIR=$SKIA_DIR/out/Release-${{ matrix.skia_arch }} \
+            ${{ matrix.os == 'macos-latest' && '-DCMAKE_OSX_ARCHITECTURES=arm64' || '' }} \
             -G Ninja
           ninja aseprite
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: aseprite-${{ runner.os }}-${{ runner.arch }}
-          path: build/bin/aseprite
+          name: aseprite-${{ runner.os }}-${{ matrix.skia_arch }}
+          path: ${{ matrix.build_dir }}/bin/aseprite*
